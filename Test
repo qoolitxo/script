@@ -1,3 +1,4 @@
+-- SERVICIOS
 local Players = game:GetService("Players")
 local PathfindingService = game:GetService("PathfindingService")
 
@@ -5,15 +6,19 @@ local jugador = Players.LocalPlayer
 local carpeta = workspace:WaitForChild("QuestPumpkins")
 
 -- CONFIGURACIÓN
+local VELOCIDAD = 20
 local TIEMPO_ESPERA = 3
-local VELOCIDAD = 16
-local DISTANCIA_LLEGADA = 5
+local DISTANCIA_OBJETO = 4
+local DISTANCIA_LLEGADA = 2.5
 local MAX_INTENTOS = 3
 
 local procesados = {}
 
+-- PERSONAJE
 local function obtenerPersonaje()
-    local personaje = jugador.Character or jugador.CharacterAdded:Wait()
+    local personaje = jugador.Character
+        or jugador.CharacterAdded:Wait()
+
     local humanoid = personaje:WaitForChild("Humanoid")
     local root = personaje:WaitForChild("HumanoidRootPart")
 
@@ -22,6 +27,7 @@ local function obtenerPersonaje()
     return personaje, humanoid, root
 end
 
+-- POSICIÓN DEL OBJETO
 local function obtenerPosicion(objeto)
     if objeto:IsA("BasePart") then
         return objeto.Position
@@ -32,9 +38,27 @@ local function obtenerPosicion(objeto)
     return nil
 end
 
-local function buscarObjetoCercano()
+-- DESTINO A 4 STUDS DEL OBJETO
+local function obtenerDestino(objeto, root)
+    local posicion = obtenerPosicion(objeto)
+    if not posicion then
+        return nil
+    end
+
+    local diferencia = root.Position - posicion
+
+    if diferencia.Magnitude < 0.1 then
+        diferencia = -root.CFrame.LookVector
+    end
+
+    return posicion + diferencia.Unit * DISTANCIA_OBJETO
+end
+
+-- OBJETO MÁS CERCANO
+local function buscarObjeto()
     local _, _, root = obtenerPersonaje()
-    local mejorObjeto = nil
+
+    local mejorObjeto
     local menorDistancia = math.huge
 
     for _, objeto in ipairs(carpeta:GetChildren()) do
@@ -55,6 +79,7 @@ local function buscarObjetoCercano()
     return mejorObjeto
 end
 
+-- RECORRIDO CON DETECCIÓN DE ATASCOS
 local function caminarHasta(objeto)
     for intento = 1, MAX_INTENTOS do
         local _, humanoid, root = obtenerPersonaje()
@@ -63,7 +88,7 @@ local function caminarHasta(objeto)
             return false
         end
 
-        local destino = obtenerPosicion(objeto)
+        local destino = obtenerDestino(objeto, root)
         if not destino then
             return false
         end
@@ -72,7 +97,7 @@ local function caminarHasta(objeto)
             AgentRadius = 2,
             AgentHeight = 5,
             AgentCanJump = true,
-            WaypointSpacing = 4
+            WaypointSpacing = 6
         })
 
         local calculada = pcall(function()
@@ -80,7 +105,7 @@ local function caminarHasta(objeto)
         end)
 
         if calculada and ruta.Status == Enum.PathStatus.Success then
-            local waypoints = ruta:GetWaypoints()
+            local puntos = ruta:GetWaypoints()
             local bloqueado = false
             local indiceActual = 1
 
@@ -92,67 +117,105 @@ local function caminarHasta(objeto)
 
             local exito = true
 
-            for i, punto in ipairs(waypoints) do
+            for i, punto in ipairs(puntos) do
                 indiceActual = i
 
-                if humanoid.Health <= 0 or not objeto.Parent or bloqueado then
+                if humanoid.Health <= 0
+                    or not objeto.Parent
+                    or bloqueado then
                     exito = false
                     break
                 end
 
-                if punto.Action == Enum.PathWaypointAction.Jump then
-                    humanoid.Jump = true
-                end
+                -- Evitar órdenes para puntos ya alcanzados
+                if (root.Position - punto.Position).Magnitude > 2 then
+                    if punto.Action == Enum.PathWaypointAction.Jump then
+                        humanoid.Jump = true
+                    end
 
-                humanoid:MoveTo(punto.Position)
+                    humanoid:MoveTo(punto.Position)
 
-                local llego = humanoid.MoveToFinished:Wait()
+                    local inicio = os.clock()
+                    local ultimaPosicion = root.Position
+                    local ultimoAvance = os.clock()
 
-                if not llego then
-                    exito = false
-                    break
+                    while humanoid.Health > 0 do
+                        if not objeto.Parent or bloqueado then
+                            exito = false
+                            break
+                        end
+
+                        if (root.Position - punto.Position).Magnitude <= 2.5 then
+                            break
+                        end
+
+                        if os.clock() - inicio > 10 then
+                            exito = false
+                            break
+                        end
+
+                        -- Detectar si dejó de avanzar
+                        if (root.Position - ultimaPosicion).Magnitude > 0.3 then
+                            ultimaPosicion = root.Position
+                            ultimoAvance = os.clock()
+                        elseif os.clock() - ultimoAvance > 2 then
+                            exito = false
+                            break
+                        end
+
+                        task.wait(0.05)
+                    end
+
+                    if not exito then
+                        break
+                    end
                 end
             end
 
             conexion:Disconnect()
 
             if exito then
-                local posicionFinal = obtenerPosicion(objeto)
+                local posicionObjeto = obtenerPosicion(objeto)
 
-                if posicionFinal and
-                    (root.Position - posicionFinal).Magnitude <= DISTANCIA_LLEGADA then
-                    return true
+                if posicionObjeto then
+                    local distancia =
+                        (root.Position - posicionObjeto).Magnitude
+
+                    if distancia <= DISTANCIA_OBJETO + DISTANCIA_LLEGADA then
+                        return true
+                    end
                 end
             end
         end
 
-        task.wait(0.2)
+        -- Solo hacer una pausa breve antes de reintentar
+        task.wait(0.1)
     end
 
     return false
 end
 
-local function iniciarRecorrido()
+-- BUCLE PRINCIPAL
+local function iniciar()
     while true do
-        local objeto = buscarObjetoCercano()
+        local objeto = buscarObjeto()
 
         if not objeto then
-            print("Recorrido terminado.")
+            print("Todos los objetos han sido procesados.")
             break
         end
 
-        print("Yendo hacia:", objeto.Name)
+        print("Objetivo:", objeto.Name)
 
         if caminarHasta(objeto) then
-            print("Llegaste a:", objeto.Name)
+            print("Llegada:", objeto.Name)
             task.wait(TIEMPO_ESPERA)
         else
             warn("No se pudo alcanzar:", objeto.Name)
         end
 
         procesados[objeto] = true
-        task.wait(0.1)
     end
 end
 
-iniciarRecorrido()
+iniciar()
