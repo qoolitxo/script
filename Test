@@ -1,23 +1,30 @@
--- CONFIGURACIÓN
+-- SERVICIOS
 local Players = game:GetService("Players")
 local PathfindingService = game:GetService("PathfindingService")
 
-local player = Players.LocalPlayer
+local jugador = Players.LocalPlayer
 local carpeta = workspace:WaitForChild("QuestPumpkins")
 
+-- CONFIGURACIÓN
 local TIEMPO_ESPERA = 3
-local DISTANCIA_LLEGADA = 4
+local DISTANCIA_CERCANA = 35
+local DISTANCIA_LLEGADA = 5
+local VELOCIDAD = 16
 
--- Esperar al personaje
+local procesados = {}
+
+-- OBTENER PERSONAJE
 local function obtenerPersonaje()
-    local personaje = player.Character or player.CharacterAdded:Wait()
+    local personaje = jugador.Character or jugador.CharacterAdded:Wait()
     local humanoid = personaje:WaitForChild("Humanoid")
     local root = personaje:WaitForChild("HumanoidRootPart")
+
+    humanoid.WalkSpeed = VELOCIDAD
 
     return personaje, humanoid, root
 end
 
--- Obtener la posición de un objeto
+-- OBTENER POSICIÓN DEL OBJETO
 local function obtenerPosicion(objeto)
     if objeto:IsA("BasePart") then
         return objeto.Position
@@ -28,7 +35,32 @@ local function obtenerPosicion(objeto)
     return nil
 end
 
--- Caminar hacia un destino usando rutas que evitan obstáculos
+-- BUSCAR EL OBJETO MÁS CERCANO
+local function buscarObjetoCercano()
+    local _, _, root = obtenerPersonaje()
+
+    local mejorObjeto = nil
+    local menorDistancia = math.huge
+
+    for _, objeto in ipairs(carpeta:GetChildren()) do
+        if not procesados[objeto] and objeto.Parent == carpeta then
+            local posicion = obtenerPosicion(objeto)
+
+            if posicion then
+                local distancia = (root.Position - posicion).Magnitude
+
+                if distancia < menorDistancia then
+                    menorDistancia = distancia
+                    mejorObjeto = objeto
+                end
+            end
+        end
+    end
+
+    return mejorObjeto, menorDistancia
+end
+
+-- CAMINAR HASTA EL OBJETO
 local function caminarHasta(destino)
     local personaje, humanoid, root = obtenerPersonaje()
 
@@ -36,22 +68,19 @@ local function caminarHasta(destino)
         AgentRadius = 2,
         AgentHeight = 5,
         AgentCanJump = true,
-        AgentCanClimb = true,
-        WaypointSpacing = 4
+        WaypointSpacing = 3
     })
 
-    local exito = pcall(function()
+    local correcto = pcall(function()
         ruta:ComputeAsync(root.Position, destino)
     end)
 
-    if not exito or ruta.Status ~= Enum.PathStatus.Success then
-        warn("No se encontró una ruta hacia el objeto.")
+    if not correcto or ruta.Status ~= Enum.PathStatus.Success then
+        warn("No se encontró una ruta.")
         return false
     end
 
-    local waypoints = ruta:GetWaypoints()
-
-    for _, punto in ipairs(waypoints) do
+    for _, punto in ipairs(ruta:GetWaypoints()) do
         if humanoid.Health <= 0 then
             return false
         end
@@ -62,9 +91,9 @@ local function caminarHasta(destino)
 
         humanoid:MoveTo(punto.Position)
 
-        local llegado = humanoid.MoveToFinished:Wait()
+        local llego = humanoid.MoveToFinished:Wait()
 
-        if not llegado then
+        if not llego then
             return false
         end
     end
@@ -72,61 +101,48 @@ local function caminarHasta(destino)
     return (root.Position - destino).Magnitude <= DISTANCIA_LLEGADA
 end
 
--- Detectar obstáculos frente al jugador mediante raycasting
-local function detectarObstaculo()
-    local personaje, humanoid, root = obtenerPersonaje()
-
-    local parametros = RaycastParams.new()
-    parametros.FilterType = Enum.RaycastFilterType.Exclude
-    parametros.FilterDescendantsInstances = {personaje}
-
-    local origen = root.Position
-    local direccion = root.CFrame.LookVector * 8
-
-    local resultado = workspace:Raycast(
-        origen,
-        direccion,
-        parametros
-    )
-
-    if resultado then
-        print("Obstáculo detectado:", resultado.Instance.Name)
-        return resultado.Instance
-    end
-
-    return nil
-end
-
--- Recorrer todos los objetos de la carpeta
-local function iniciarRecorrido()
+-- RECORRIDO AUTOMÁTICO
+local function iniciar()
     while true do
-        local objetos = carpeta:GetChildren()
+        local objeto, distancia = buscarObjetoCercano()
 
-        for _, objeto in ipairs(objetos) do
-            local destino = obtenerPosicion(objeto)
-
-            if destino then
-                print("Yendo hacia:", objeto.Name)
-
-                local llego = caminarHasta(destino)
-
-                if llego then
-                    print("Llegada:", objeto.Name)
-
-                    task.wait(TIEMPO_ESPERA)
-                else
-                    warn("No se pudo llegar a:", objeto.Name)
-                end
-            end
-        end
-
-        -- Si no quedan objetos, detener el recorrido
-        if #carpeta:GetChildren() == 0 then
+        if not objeto then
+            print("No quedan objetos disponibles.")
             break
         end
 
-        task.wait(0.1)
+        -- Solo priorizar objetos que estén dentro del rango configurado.
+        -- Si no hay ninguno cerca, buscar el más cercano de toda la carpeta.
+        if distancia > DISTANCIA_CERCANA then
+            print("Buscando el objeto más cercano fuera del rango.")
+        end
+
+        local destino = obtenerPosicion(objeto)
+
+        if destino then
+            print("Yendo hacia:", objeto.Name)
+
+            local llego = caminarHasta(destino)
+
+            if llego then
+                print("Llegaste a:", objeto.Name)
+
+                -- Esperar tres segundos
+                task.wait(TIEMPO_ESPERA)
+
+                -- Marcarlo como procesado para no volver a elegirlo
+                procesados[objeto] = true
+            else
+                -- Evitar quedarse atascado intentando el mismo objeto
+                procesados[objeto] = true
+                warn("No se pudo alcanzar:", objeto.Name)
+            end
+        else
+            procesados[objeto] = true
+        end
+
+        task.wait(0.05)
     end
 end
 
-iniciarRecorrido()
+iniciar()
