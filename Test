@@ -1,1 +1,133 @@
+local Players = game:GetService("Players")
+local PathfindingService = game:GetService("PathfindingService")
+local RunService = game:GetService("RunService")
 
+local player = Players.LocalPlayer
+
+local carpeta = workspace.WorkspaceCom["001_MapLights"].BlackPoles
+
+-- Configuración del movimiento
+local DISTANCIA_LLEGADA = 5
+local DISTANCIA_DETECCION = 7
+local DISTANCIA_LATERAL = 6
+local VELOCIDAD_RECALCULO = 0.6
+
+local function obtenerPosicion(objeto)
+    if objeto:IsA("BasePart") then
+        return objeto.Position
+    elseif objeto:IsA("Model") then
+        return objeto:GetPivot().Position
+    end
+
+    return nil
+end
+
+-- Detectar obstáculos frente al personaje
+local function detectarObstaculo(character, root)
+    local parametros = RaycastParams.new()
+    parametros.FilterType = Enum.RaycastFilterType.Exclude
+    parametros.FilterDescendantsInstances = {character}
+
+    local origen = root.Position
+    local direccion = root.CFrame.LookVector * DISTANCIA_DETECCION
+
+    return workspace:Raycast(origen, direccion, parametros)
+end
+
+-- Comprobar si hay espacio en una dirección
+local function espacioLibre(character, root, direccion)
+    local parametros = RaycastParams.new()
+    parametros.FilterType = Enum.RaycastFilterType.Exclude
+    parametros.FilterDescendantsInstances = {character}
+
+    local origen = root.Position + Vector3.new(0, 1, 0)
+    local resultado = workspace:Raycast(
+        origen,
+        direccion.Unit * DISTANCIA_LATERAL,
+        parametros
+    )
+
+    return resultado == nil
+end
+
+-- Caminar hacia un destino evitando obstáculos
+local function caminarHacia(destino)
+    local character = player.Character or player.CharacterAdded:Wait()
+    local humanoid = character:WaitForChild("Humanoid")
+    local root = character:WaitForChild("HumanoidRootPart")
+
+    humanoid.AutoRotate = true
+
+    local ultimoCalculo = 0
+    local destinoTemporal = destino
+
+    while character.Parent and humanoid.Health > 0 do
+        local distancia = (root.Position - destino).Magnitude
+
+        if distancia <= DISTANCIA_LLEGADA then
+            break
+        end
+
+        if os.clock() - ultimoCalculo >= VELOCIDAD_RECALCULO then
+            ultimoCalculo = os.clock()
+
+            local obstaculo = detectarObstaculo(character, root)
+
+            if obstaculo then
+                local derecha = root.CFrame.RightVector
+                local izquierda = -derecha
+
+                local derechaLibre =
+                    espacioLibre(character, root, derecha)
+
+                local izquierdaLibre =
+                    espacioLibre(character, root, izquierda)
+
+                if derechaLibre then
+                    destinoTemporal =
+                        root.Position + derecha * DISTANCIA_LATERAL
+                elseif izquierdaLibre then
+                    destinoTemporal =
+                        root.Position + izquierda * DISTANCIA_LATERAL
+                else
+                    -- Si ambos lados están bloqueados, intenta
+                    -- calcular una ruta alrededor del obstáculo.
+                    local path = PathfindingService:CreatePath()
+
+                    local ok = pcall(function()
+                        path:ComputeAsync(root.Position, destino)
+                    end)
+
+                    if ok and path.Status == Enum.PathStatus.Success then
+                        local puntos = path:GetWaypoints()
+
+                        if #puntos > 1 then
+                            destinoTemporal = puntos[2].Position
+                        else
+                            destinoTemporal = destino
+                        end
+                    else
+                        humanoid.Jump = true
+                        destinoTemporal = destino
+                    end
+                end
+            else
+                destinoTemporal = destino
+            end
+
+            humanoid:MoveTo(destinoTemporal)
+        end
+
+        RunService.Heartbeat:Wait()
+    end
+end
+
+-- Recorrer los objetos de la carpeta
+for _, objeto in ipairs(carpeta:GetChildren()) do
+    local destino = obtenerPosicion(objeto)
+
+    if destino then
+        caminarHacia(destino)
+        task.wait(0.2)
+    end
+end
