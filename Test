@@ -2,17 +2,12 @@ local Players = game:GetService("Players")
 local PathfindingService = game:GetService("PathfindingService")
 
 local player = Players.LocalPlayer
+local carpeta = workspace:WaitForChild("QuestPumpkins")
 
--- PUNTOS DE DESTINO
-local puntoA = workspace.HalloweenDeco:GetChildren()[119].Pumpkin
-local puntoB = workspace:GetChildren()[42]:GetChildren()[24]["Cylinder.004"]
+local DISTANCIA_LLEGADA = 5
+local TIEMPO_REINTENTO = 1
 
--- CONFIGURACIÓN
-local DISTANCIA_LLEGADA = 4
-local TIEMPO_ATASCADO = 3
-local RADIO_AGENTE = 2
-local ALTURA_AGENTE = 5
-
+-- Obtener la posición del objetivo
 local function obtenerPosicion(objeto)
     if objeto:IsA("BasePart") then
         return objeto.Position
@@ -20,36 +15,35 @@ local function obtenerPosicion(objeto)
         return objeto:GetPivot().Position
     end
 
-    error("El destino no es una pieza ni un modelo válido")
+    return nil
 end
 
+-- Calcular una ruta
 local function calcularRuta(origen, destino)
     local ruta = PathfindingService:CreatePath({
-        AgentRadius = RADIO_AGENTE,
-        AgentHeight = ALTURA_AGENTE,
+        AgentRadius = 2,
+        AgentHeight = 5,
         AgentCanJump = true,
         AgentCanClimb = true,
         WaypointSpacing = 4
     })
 
-    local exito = pcall(function()
+    local correcto = pcall(function()
         ruta:ComputeAsync(origen, destino)
     end)
 
-    if exito and ruta.Status == Enum.PathStatus.Success then
+    if correcto and ruta.Status == Enum.PathStatus.Success then
         return ruta
     end
 
     return nil
 end
 
-local function caminarA(destino)
+-- Caminar hacia el objetivo
+local function caminarHacia(destino)
     local personaje = player.Character or player.CharacterAdded:Wait()
     local humanoid = personaje:WaitForChild("Humanoid")
     local root = personaje:WaitForChild("HumanoidRootPart")
-
-    local ultimaPosicion = root.Position
-    local ultimoProgreso = os.clock()
 
     while humanoid.Health > 0 do
         if (root.Position - destino).Magnitude <= DISTANCIA_LLEGADA then
@@ -59,115 +53,121 @@ local function caminarA(destino)
         local ruta = calcularRuta(root.Position, destino)
 
         if not ruta then
-            warn("No se encontró una ruta. Se volverá a intentar.")
-            task.wait(1)
+            task.wait(TIEMPO_REINTENTO)
             continue
         end
 
-        local bloqueada = false
+        local recalcular = false
 
-        local conexion = ruta.Blocked:Connect(function()
-            bloqueada = true
-        end)
-
-        local necesitaRecalcular = false
-
-        for indice, waypoint in ipairs(ruta:GetWaypoints()) do
+        for indice, punto in ipairs(ruta:GetWaypoints()) do
             if indice > 1 then
-                if bloqueada then
-                    necesitaRecalcular = true
-                    break
-                end
-
-                if waypoint.Action == Enum.PathWaypointAction.Jump then
+                if punto.Action == Enum.PathWaypointAction.Jump then
                     humanoid.Jump = true
                 end
 
-                humanoid:MoveTo(waypoint.Position)
+                humanoid:MoveTo(punto.Position)
 
-                local inicio = os.clock()
+                local llego = humanoid.MoveToFinished:Wait()
 
-                while humanoid.Health > 0 do
-                    task.wait(0.15)
-
-                    if (root.Position - destino).Magnitude
-                        <= DISTANCIA_LLEGADA then
-                        conexion:Disconnect()
-                        return true
-                    end
-
-                    if bloqueada then
-                        necesitaRecalcular = true
-                        break
-                    end
-
-                    if (root.Position - ultimaPosicion).Magnitude >= 1 then
-                        ultimaPosicion = root.Position
-                        ultimoProgreso = os.clock()
-                    end
-
-                    if os.clock() - ultimoProgreso >= TIEMPO_ATASCADO then
-                        warn("Personaje atascado. Recalculando ruta.")
-                        humanoid.Jump = true
-                        necesitaRecalcular = true
-                        break
-                    end
-
-                    if os.clock() - inicio >= 5 then
-                        necesitaRecalcular = true
-                        break
-                    end
-
-                    if (root.Position - waypoint.Position).Magnitude
-                        <= DISTANCIA_LLEGADA then
-                        break
-                    end
+                if not llego then
+                    recalcular = true
+                    break
                 end
 
-                if necesitaRecalcular then
-                    break
+                if (root.Position - destino).Magnitude <= DISTANCIA_LLEGADA then
+                    return true
                 end
             end
         end
 
-        conexion:Disconnect()
-        task.wait(0.2)
+        if not recalcular then
+            task.wait(0.1)
+        end
     end
 
     return false
 end
 
--- RECORRIDO: A -> B
-local function iniciarRecorrido()
-    local exito, resultado = pcall(function()
-        local posicionA = obtenerPosicion(puntoA)
-        local posicionB = obtenerPosicion(puntoB)
+-- Orientar el personaje hacia el objetivo
+local function apuntarHacia(destino)
+    local personaje = player.Character
+    if not personaje then return end
 
-        print("Iniciando recorrido desde A hasta B.")
+    local root = personaje:FindFirstChild("HumanoidRootPart")
+    local humanoid = personaje:FindFirstChildOfClass("Humanoid")
 
-        -- Primero se dirige al punto A.
-        local llegoA = caminarA(posicionA)
+    if not root then return end
 
-        if not llegoA then
-            warn("No se pudo alcanzar el punto A.")
-            return
-        end
+    local posicion = Vector3.new(
+        destino.X,
+        root.Position.Y,
+        destino.Z
+    )
 
-        print("Punto A alcanzado. Dirigiéndose al punto B.")
+    if humanoid then
+        humanoid.AutoRotate = false
+    end
 
-        -- Después continúa hacia el punto B.
-        local llegoB = caminarA(posicionB)
+    root.CFrame = CFrame.lookAt(root.Position, posicion)
 
-        if llegoB then
-            print("¡Punto B alcanzado!")
-        else
-            warn("No se pudo alcanzar el punto B.")
-        end
-    end)
+    task.wait(0.2)
 
-    if not exito then
-        warn("Error en el recorrido: " .. tostring(resultado))
+    if humanoid then
+        humanoid.AutoRotate = true
     end
 end
 
-iniciarRecorrido()
+-- Acciones para conectar con las mecánicas de tu juego
+local function clicDerecho(objetivo)
+    print("Acción de clic derecho para:", objetivo:GetFullName())
+
+    -- Conecta aquí la acción de apuntar o preparar la herramienta.
+end
+
+local function clicIzquierdo(objetivo)
+    print("Acción de clic izquierdo para:", objetivo:GetFullName())
+
+    -- Conecta aquí la acción de usar la herramienta.
+end
+
+-- Obtener los objetivos
+local function obtenerObjetivos()
+    local objetivos = {}
+
+    for _, objeto in ipairs(carpeta:GetChildren()) do
+        if obtenerPosicion(objeto) then
+            table.insert(objetivos, objeto)
+        end
+    end
+
+    return objetivos
+end
+
+-- Recorrido automático
+for _, objetivo in ipairs(obtenerObjetivos()) do
+    if not objetivo.Parent then
+        continue
+    end
+
+    local destino = obtenerPosicion(objetivo)
+
+    if destino then
+        print("Yendo hacia:", objetivo.Name)
+
+        local llego = caminarHacia(destino)
+
+        if llego then
+            apuntarHacia(destino)
+
+            clicDerecho(objetivo)
+            task.wait(0.3)
+
+            apuntarHacia(destino)
+            clicIzquierdo(objetivo)
+
+            task.wait(0.5)
+        end
+    end
+end
+
+print("Recorrido finalizado.")
