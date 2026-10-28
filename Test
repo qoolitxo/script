@@ -1,136 +1,62 @@
+--==================================================
+-- CONFIGURACIÓN
+--==================================================
+
 local Players = game:GetService("Players")
 local PathfindingService = game:GetService("PathfindingService")
 
 local player = Players.LocalPlayer
 local carpeta = workspace:WaitForChild("QuestPumpkins")
 
-local DISTANCIA_LLEGADA = 5
-local TIEMPO_REINTENTO = 1
+local CONFIG = {
+    DistanciaLlegada = 5,
+    EsperaEnObjetivo = 3,
 
--- Obtener la posición del objetivo
+    RadioAgente = 2,
+    AlturaAgente = 5,
+    SeparacionWaypoints = 3,
+
+    DistanciaDeteccion = 12,
+    IntervaloRecalculo = 0.5,
+    TiempoAtascado = 2.5,
+    IntentosRuta = 5,
+
+    DistanciaProgreso = 1,
+    TiempoMaximoWaypoint = 8,
+}
+
+local activo = true
+
+--==================================================
+-- PERSONAJE
+--==================================================
+
+local function obtenerPersonaje()
+    local character = player.Character
+        or player.CharacterAdded:Wait()
+
+    local humanoid = character:WaitForChild("Humanoid")
+    local root = character:WaitForChild("HumanoidRootPart")
+
+    return character, humanoid, root
+end
+
+--==================================================
+-- POSICIÓN DE LOS OBJETIVOS
+--==================================================
+
 local function obtenerPosicion(objeto)
     if objeto:IsA("BasePart") then
         return objeto.Position
-    elseif objeto:IsA("Model") then
+    end
+
+    if objeto:IsA("Model") then
         return objeto:GetPivot().Position
     end
 
     return nil
 end
 
--- Calcular una ruta
-local function calcularRuta(origen, destino)
-    local ruta = PathfindingService:CreatePath({
-        AgentRadius = 2,
-        AgentHeight = 5,
-        AgentCanJump = true,
-        AgentCanClimb = true,
-        WaypointSpacing = 4
-    })
-
-    local correcto = pcall(function()
-        ruta:ComputeAsync(origen, destino)
-    end)
-
-    if correcto and ruta.Status == Enum.PathStatus.Success then
-        return ruta
-    end
-
-    return nil
-end
-
--- Caminar hacia el objetivo
-local function caminarHacia(destino)
-    local personaje = player.Character or player.CharacterAdded:Wait()
-    local humanoid = personaje:WaitForChild("Humanoid")
-    local root = personaje:WaitForChild("HumanoidRootPart")
-
-    while humanoid.Health > 0 do
-        if (root.Position - destino).Magnitude <= DISTANCIA_LLEGADA then
-            return true
-        end
-
-        local ruta = calcularRuta(root.Position, destino)
-
-        if not ruta then
-            task.wait(TIEMPO_REINTENTO)
-            continue
-        end
-
-        local recalcular = false
-
-        for indice, punto in ipairs(ruta:GetWaypoints()) do
-            if indice > 1 then
-                if punto.Action == Enum.PathWaypointAction.Jump then
-                    humanoid.Jump = true
-                end
-
-                humanoid:MoveTo(punto.Position)
-
-                local llego = humanoid.MoveToFinished:Wait()
-
-                if not llego then
-                    recalcular = true
-                    break
-                end
-
-                if (root.Position - destino).Magnitude <= DISTANCIA_LLEGADA then
-                    return true
-                end
-            end
-        end
-
-        if not recalcular then
-            task.wait(0.1)
-        end
-    end
-
-    return false
-end
-
--- Orientar el personaje hacia el objetivo
-local function apuntarHacia(destino)
-    local personaje = player.Character
-    if not personaje then return end
-
-    local root = personaje:FindFirstChild("HumanoidRootPart")
-    local humanoid = personaje:FindFirstChildOfClass("Humanoid")
-
-    if not root then return end
-
-    local posicion = Vector3.new(
-        destino.X,
-        root.Position.Y,
-        destino.Z
-    )
-
-    if humanoid then
-        humanoid.AutoRotate = false
-    end
-
-    root.CFrame = CFrame.lookAt(root.Position, posicion)
-
-    task.wait(0.2)
-
-    if humanoid then
-        humanoid.AutoRotate = true
-    end
-end
-
--- Acciones para conectar con las mecánicas de tu juego
-local function clicDerecho(objetivo)
-    print("Acción de clic derecho para:", objetivo:GetFullName())
-
-    -- Conecta aquí la acción de apuntar o preparar la herramienta.
-end
-
-local function clicIzquierdo(objetivo)
-    print("Acción de clic izquierdo para:", objetivo:GetFullName())
-
-    -- Conecta aquí la acción de usar la herramienta.
-end
-
--- Obtener los objetivos
 local function obtenerObjetivos()
     local objetivos = {}
 
@@ -140,34 +66,281 @@ local function obtenerObjetivos()
         end
     end
 
+    -- Orden determinista por nombre
+    table.sort(objetivos, function(a, b)
+        return a.Name < b.Name
+    end)
+
     return objetivos
 end
 
--- Recorrido automático
-for _, objetivo in ipairs(obtenerObjetivos()) do
-    if not objetivo.Parent then
-        continue
+--==================================================
+-- DETECCIÓN DE OBSTÁCULOS
+--==================================================
+
+local function crearParametros(character)
+    local params = RaycastParams.new()
+
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {character}
+    params.IgnoreWater = true
+
+    return params
+end
+
+local function detectarObstaculos(character, root)
+    local params = crearParametros(character)
+
+    local origen = root.Position + Vector3.new(0, 1, 0)
+
+    local frente = root.CFrame.LookVector
+    local derecha = root.CFrame.RightVector
+
+    local direcciones = {
+        frente,
+        (frente + derecha * 0.5).Unit,
+        (frente - derecha * 0.5).Unit,
+        (frente + Vector3.new(0, 0.3, 0)).Unit,
+        (frente - Vector3.new(0, 0.2, 0)).Unit,
+    }
+
+    local resultados = {}
+
+    for _, direccion in ipairs(direcciones) do
+        local resultado = workspace:Raycast(
+            origen,
+            direccion * CONFIG.DistanciaDeteccion,
+            params
+        )
+
+        if resultado then
+            table.insert(resultados, resultado)
+        end
     end
 
-    local destino = obtenerPosicion(objetivo)
+    return resultados
+end
 
-    if destino then
-        print("Yendo hacia:", objetivo.Name)
+--==================================================
+-- CÁLCULO DE RUTAS
+--==================================================
+
+local function calcularRuta(origen, destino)
+    local path = PathfindingService:CreatePath({
+        AgentRadius = CONFIG.RadioAgente,
+        AgentHeight = CONFIG.AlturaAgente,
+        AgentCanJump = true,
+        AgentCanClimb = true,
+        WaypointSpacing = CONFIG.SeparacionWaypoints,
+    })
+
+    local correcto = pcall(function()
+        path:ComputeAsync(origen, destino)
+    end)
+
+    if correcto and path.Status == Enum.PathStatus.Success then
+        return path
+    end
+
+    return nil
+end
+
+--==================================================
+-- CAMINAR HACIA UN OBJETIVO
+--==================================================
+
+local function caminarHacia(destino)
+    local character, humanoid, root = obtenerPersonaje()
+
+    local ultimoProgreso = os.clock()
+    local ultimaPosicion = root.Position
+
+    for intento = 1, CONFIG.IntentosRuta do
+        if not activo or humanoid.Health <= 0 then
+            return false
+        end
+
+        if (root.Position - destino).Magnitude
+            <= CONFIG.DistanciaLlegada then
+            return true
+        end
+
+        local path = calcularRuta(root.Position, destino)
+
+        if not path then
+            warn("No se encontró una ruta. Intento:", intento)
+            task.wait(CONFIG.IntervaloRecalculo)
+            continue
+        end
+
+        local bloqueada = false
+
+        local conexion = path.Blocked:Connect(function()
+            bloqueada = true
+        end)
+
+        local necesitaNuevaRuta = false
+
+        for indice, waypoint in ipairs(path:GetWaypoints()) do
+            if indice == 1 then
+                continue
+            end
+
+            if not activo or humanoid.Health <= 0 then
+                conexion:Disconnect()
+                return false
+            end
+
+            if bloqueada then
+                necesitaNuevaRuta = true
+                break
+            end
+
+            -- Detectar obstáculos antes de avanzar.
+            local obstaculos =
+                detectarObstaculos(character, root)
+
+            if #obstaculos > 0 then
+                -- Si la ruta todavía está disponible,
+                -- se recalcula desde la posición actual.
+                necesitaNuevaRuta = true
+                break
+            end
+
+            if waypoint.Action == Enum.PathWaypointAction.Jump then
+                humanoid.Jump = true
+            end
+
+            humanoid:MoveTo(waypoint.Position)
+
+            local inicioWaypoint = os.clock()
+            local waypointAlcanzado = false
+
+            while activo and humanoid.Health > 0 do
+                task.wait(CONFIG.IntervaloRecalculo)
+
+                if (root.Position - destino).Magnitude
+                    <= CONFIG.DistanciaLlegada then
+                    conexion:Disconnect()
+                    return true
+                end
+
+                if bloqueada then
+                    necesitaNuevaRuta = true
+                    break
+                end
+
+                local desplazamiento =
+                    (root.Position - ultimaPosicion).Magnitude
+
+                if desplazamiento >= CONFIG.DistanciaProgreso then
+                    ultimaPosicion = root.Position
+                    ultimoProgreso = os.clock()
+                end
+
+                if os.clock() - ultimoProgreso
+                    >= CONFIG.TiempoAtascado then
+                    warn("Atasco detectado. Buscando otra ruta.")
+
+                    humanoid.Jump = true
+                    necesitaNuevaRuta = true
+                    break
+                end
+
+                if (root.Position - waypoint.Position).Magnitude
+                    <= CONFIG.DistanciaLlegada then
+                    waypointAlcanzado = true
+                    break
+                end
+
+                if os.clock() - inicioWaypoint
+                    >= CONFIG.TiempoMaximoWaypoint then
+                    necesitaNuevaRuta = true
+                    break
+                end
+
+                -- Reaccionar a obstáculos que aparezcan delante.
+                if #detectarObstaculos(character, root) > 0 then
+                    necesitaNuevaRuta = true
+                    break
+                end
+            end
+
+            if necesitaNuevaRuta then
+                break
+            end
+
+            if not waypointAlcanzado then
+                necesitaNuevaRuta = true
+                break
+            end
+        end
+
+        conexion:Disconnect()
+
+        if (root.Position - destino).Magnitude
+            <= CONFIG.DistanciaLlegada then
+            return true
+        end
+
+        task.wait(0.2)
+    end
+
+    warn("No fue posible alcanzar el destino:", destino)
+    return false
+end
+
+--==================================================
+-- RECORRIDO SECUENCIAL
+--==================================================
+
+local function iniciarRecorrido()
+    local objetivos = obtenerObjetivos()
+
+    if #objetivos == 0 then
+        warn("No se encontraron objetivos válidos.")
+        return
+    end
+
+    print("Objetivos encontrados:", #objetivos)
+
+    for indice, objeto in ipairs(objetivos) do
+        if not activo then
+            break
+        end
+
+        if not objeto:IsDescendantOf(carpeta) then
+            continue
+        end
+
+        local destino = obtenerPosicion(objeto)
+
+        if not destino then
+            continue
+        end
+
+        print(
+            "Objetivo",
+            indice,
+            "de",
+            #objetivos,
+            ":",
+            objeto.Name
+        )
 
         local llego = caminarHacia(destino)
 
         if llego then
-            apuntarHacia(destino)
+            print("Llegada confirmada:", objeto.Name)
 
-            clicDerecho(objetivo)
-            task.wait(0.3)
-
-            apuntarHacia(destino)
-            clicIzquierdo(objetivo)
-
-            task.wait(0.5)
+            -- Esperar tres segundos antes de continuar.
+            task.wait(CONFIG.EsperaEnObjetivo)
+        else
+            warn("Se omitió el objetivo:", objeto.Name)
         end
     end
+
+    print("Recorrido finalizado.")
 end
 
-print("Recorrido finalizado.")
+iniciarRecorrido()
