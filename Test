@@ -1,17 +1,19 @@
 -- SERVICIOS
 local Players = game:GetService("Players")
 local PathfindingService = game:GetService("PathfindingService")
+local RunService = game:GetService("RunService")
 
 local jugador = Players.LocalPlayer
 local carpeta = workspace:WaitForChild("QuestPumpkins")
 
 -- CONFIGURACIÓN
 local TIEMPO_ESPERA = 3
-local DISTANCIA_CERCANA = 35
-local DISTANCIA_LLEGADA = 5
 local VELOCIDAD = 16
+local DISTANCIA_LLEGADA = 5
+local DISTANCIA_RECALCULO = 8
 
 local procesados = {}
+local detenido = false
 
 -- OBTENER PERSONAJE
 local function obtenerPersonaje()
@@ -24,7 +26,7 @@ local function obtenerPersonaje()
     return personaje, humanoid, root
 end
 
--- OBTENER POSICIÓN DEL OBJETO
+-- POSICIÓN DEL OBJETO
 local function obtenerPosicion(objeto)
     if objeto:IsA("BasePart") then
         return objeto.Position
@@ -47,7 +49,8 @@ local function buscarObjetoCercano()
             local posicion = obtenerPosicion(objeto)
 
             if posicion then
-                local distancia = (root.Position - posicion).Magnitude
+                local distancia =
+                    (root.Position - posicion).Magnitude
 
                 if distancia < menorDistancia then
                     menorDistancia = distancia
@@ -57,10 +60,10 @@ local function buscarObjetoCercano()
         end
     end
 
-    return mejorObjeto, menorDistancia
+    return mejorObjeto
 end
 
--- CAMINAR HASTA EL OBJETO
+-- MOVIMIENTO CON RECALCULO DE RUTA
 local function caminarHasta(destino)
     local personaje, humanoid, root = obtenerPersonaje()
 
@@ -68,7 +71,7 @@ local function caminarHasta(destino)
         AgentRadius = 2,
         AgentHeight = 5,
         AgentCanJump = true,
-        WaypointSpacing = 3
+        WaypointSpacing = 5
     })
 
     local correcto = pcall(function()
@@ -76,45 +79,78 @@ local function caminarHasta(destino)
     end)
 
     if not correcto or ruta.Status ~= Enum.PathStatus.Success then
-        warn("No se encontró una ruta.")
         return false
     end
 
-    for _, punto in ipairs(ruta:GetWaypoints()) do
+    local waypoints = ruta:GetWaypoints()
+    local indice = 2
+    local ultimaPosicion = root.Position
+    local tiempoRecalculo = 0
+
+    while indice <= #waypoints do
         if humanoid.Health <= 0 then
             return false
         end
 
+        if not destino then
+            return false
+        end
+
+        local punto = waypoints[indice]
+
+        -- Saltar si es necesario
         if punto.Action == Enum.PathWaypointAction.Jump then
             humanoid.Jump = true
         end
 
+        -- Mantener el movimiento hacia el siguiente punto
         humanoid:MoveTo(punto.Position)
 
-        local llego = humanoid.MoveToFinished:Wait()
+        -- Esperar brevemente mientras se comprueba el progreso
+        local tiempoInicio = os.clock()
 
-        if not llego then
-            return false
+        while os.clock() - tiempoInicio < 0.15 do
+            RunService.Heartbeat:Wait()
+
+            if humanoid.Health <= 0 then
+                return false
+            end
+
+            if (root.Position - punto.Position).Magnitude <= 2.5 then
+                indice += 1
+                break
+            end
+        end
+
+        -- Detectar si el personaje está atascado
+        tiempoRecalculo += 0.15
+
+        if tiempoRecalculo >= 1 then
+            local movimiento =
+                (root.Position - ultimaPosicion).Magnitude
+
+            if movimiento < 0.5 then
+                break
+            end
+
+            ultimaPosicion = root.Position
+            tiempoRecalculo = 0
         end
     end
 
-    return (root.Position - destino).Magnitude <= DISTANCIA_LLEGADA
+    -- Comprobar llegada
+    return (root.Position - destino).Magnitude
+        <= DISTANCIA_LLEGADA
 end
 
 -- RECORRIDO AUTOMÁTICO
 local function iniciar()
-    while true do
-        local objeto, distancia = buscarObjetoCercano()
+    while not detenido do
+        local objeto = buscarObjetoCercano()
 
         if not objeto then
-            print("No quedan objetos disponibles.")
+            print("Recorrido terminado.")
             break
-        end
-
-        -- Solo priorizar objetos que estén dentro del rango configurado.
-        -- Si no hay ninguno cerca, buscar el más cercano de toda la carpeta.
-        if distancia > DISTANCIA_CERCANA then
-            print("Buscando el objeto más cercano fuera del rango.")
         end
 
         local destino = obtenerPosicion(objeto)
@@ -127,21 +163,20 @@ local function iniciar()
             if llego then
                 print("Llegaste a:", objeto.Name)
 
-                -- Esperar tres segundos
+                -- Esperar tres segundos en el objeto
                 task.wait(TIEMPO_ESPERA)
 
-                -- Marcarlo como procesado para no volver a elegirlo
                 procesados[objeto] = true
             else
-                -- Evitar quedarse atascado intentando el mismo objeto
+                warn("No se pudo llegar a:", objeto.Name)
                 procesados[objeto] = true
-                warn("No se pudo alcanzar:", objeto.Name)
             end
         else
             procesados[objeto] = true
         end
 
-        task.wait(0.05)
+        -- Sin pausas innecesarias entre objetivos
+        RunService.Heartbeat:Wait()
     end
 end
 
