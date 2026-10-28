@@ -1,221 +1,148 @@
--- SERVICIOS
 local Players = game:GetService("Players")
 local PathfindingService = game:GetService("PathfindingService")
 
-local jugador = Players.LocalPlayer
-local carpeta = workspace:WaitForChild("QuestPumpkins")
+local player = Players.LocalPlayer
 
--- CONFIGURACIÓN
-local VELOCIDAD = 20
-local TIEMPO_ESPERA = 3
+local CARPETA = workspace:WaitForChild("QuestPumpkins")
 local DISTANCIA_OBJETO = 4
-local DISTANCIA_LLEGADA = 2.5
-local MAX_INTENTOS = 3
+local TIEMPO_ESPERA = 3
+local VELOCIDAD = 16
 
-local procesados = {}
+local procesadas = {}
+local ocupado = false
 
--- PERSONAJE
 local function obtenerPersonaje()
-    local personaje = jugador.Character
-        or jugador.CharacterAdded:Wait()
-
-    local humanoid = personaje:WaitForChild("Humanoid")
-    local root = personaje:WaitForChild("HumanoidRootPart")
-
-    humanoid.WalkSpeed = VELOCIDAD
-
-    return personaje, humanoid, root
+local personaje = player.Character or player.CharacterAdded:Wait()
+local humanoid = personaje:WaitForChild("Humanoid")
+local root = personaje:WaitForChild("HumanoidRootPart")
+return personaje, humanoid, root
 end
 
--- POSICIÓN DEL OBJETO
 local function obtenerPosicion(objeto)
-    if objeto:IsA("BasePart") then
-        return objeto.Position
-    elseif objeto:IsA("Model") then
-        return objeto:GetPivot().Position
-    end
-
-    return nil
+if objeto:IsA("Model") then
+return objeto:GetPivot().Position
+elseif objeto:IsA("BasePart") then
+return objeto.Position
+end
+return nil
 end
 
--- DESTINO A 4 STUDS DEL OBJETO
-local function obtenerDestino(objeto, root)
-    local posicion = obtenerPosicion(objeto)
-    if not posicion then
-        return nil
-    end
+local function buscarMasCercana(root)
+local mejorObjeto = nil
+local mejorDistancia = math.huge
 
-    local diferencia = root.Position - posicion
+for _, objeto in ipairs(CARPETA:GetChildren()) do
+    if not procesadas[objeto] and objeto.Parent then
+        local posicion = obtenerPosicion(objeto)
 
-    if diferencia.Magnitude < 0.1 then
-        diferencia = -root.CFrame.LookVector
-    end
+        if posicion then
+            local distancia = (root.Position - posicion).Magnitude
 
-    return posicion + diferencia.Unit * DISTANCIA_OBJETO
-end
-
--- OBJETO MÁS CERCANO
-local function buscarObjeto()
-    local _, _, root = obtenerPersonaje()
-
-    local mejorObjeto
-    local menorDistancia = math.huge
-
-    for _, objeto in ipairs(carpeta:GetChildren()) do
-        if not procesados[objeto] and objeto.Parent == carpeta then
-            local posicion = obtenerPosicion(objeto)
-
-            if posicion then
-                local distancia = (root.Position - posicion).Magnitude
-
-                if distancia < menorDistancia then
-                    menorDistancia = distancia
-                    mejorObjeto = objeto
-                end
+            if distancia < mejorDistancia then
+                mejorDistancia = distancia
+                mejorObjeto = objeto
             end
         end
     end
-
-    return mejorObjeto
 end
 
--- RECORRIDO CON DETECCIÓN DE ATASCOS
-local function caminarHasta(objeto)
-    for intento = 1, MAX_INTENTOS do
-        local _, humanoid, root = obtenerPersonaje()
+return mejorObjeto
 
-        if humanoid.Health <= 0 or not objeto.Parent then
-            return false
-        end
+end
 
-        local destino = obtenerDestino(objeto, root)
-        if not destino then
-            return false
-        end
+local function caminarA(humanoid, root, destino)
+local path = PathfindingService:CreatePath({
+AgentRadius = 2,
+AgentHeight = 5,
+AgentCanJump = true,
+WaypointSpacing = 4
+})
 
-        local ruta = PathfindingService:CreatePath({
-            AgentRadius = 2,
-            AgentHeight = 5,
-            AgentCanJump = true,
-            WaypointSpacing = 6
-        })
+local exito = pcall(function()
+    path:ComputeAsync(root.Position, destino)
+end)
 
-        local calculada = pcall(function()
-            ruta:ComputeAsync(root.Position, destino)
-        end)
-
-        if calculada and ruta.Status == Enum.PathStatus.Success then
-            local puntos = ruta:GetWaypoints()
-            local bloqueado = false
-            local indiceActual = 1
-
-            local conexion = ruta.Blocked:Connect(function(indice)
-                if indice >= indiceActual then
-                    bloqueado = true
-                end
-            end)
-
-            local exito = true
-
-            for i, punto in ipairs(puntos) do
-                indiceActual = i
-
-                if humanoid.Health <= 0
-                    or not objeto.Parent
-                    or bloqueado then
-                    exito = false
-                    break
-                end
-
-                -- Evitar órdenes para puntos ya alcanzados
-                if (root.Position - punto.Position).Magnitude > 2 then
-                    if punto.Action == Enum.PathWaypointAction.Jump then
-                        humanoid.Jump = true
-                    end
-
-                    humanoid:MoveTo(punto.Position)
-
-                    local inicio = os.clock()
-                    local ultimaPosicion = root.Position
-                    local ultimoAvance = os.clock()
-
-                    while humanoid.Health > 0 do
-                        if not objeto.Parent or bloqueado then
-                            exito = false
-                            break
-                        end
-
-                        if (root.Position - punto.Position).Magnitude <= 2.5 then
-                            break
-                        end
-
-                        if os.clock() - inicio > 10 then
-                            exito = false
-                            break
-                        end
-
-                        -- Detectar si dejó de avanzar
-                        if (root.Position - ultimaPosicion).Magnitude > 0.3 then
-                            ultimaPosicion = root.Position
-                            ultimoAvance = os.clock()
-                        elseif os.clock() - ultimoAvance > 2 then
-                            exito = false
-                            break
-                        end
-
-                        task.wait(0.05)
-                    end
-
-                    if not exito then
-                        break
-                    end
-                end
-            end
-
-            conexion:Disconnect()
-
-            if exito then
-                local posicionObjeto = obtenerPosicion(objeto)
-
-                if posicionObjeto then
-                    local distancia =
-                        (root.Position - posicionObjeto).Magnitude
-
-                    if distancia <= DISTANCIA_OBJETO + DISTANCIA_LLEGADA then
-                        return true
-                    end
-                end
-            end
-        end
-
-        -- Solo hacer una pausa breve antes de reintentar
-        task.wait(0.1)
-    end
-
+if not exito or path.Status ~= Enum.PathStatus.Success then
+    warn("No se pudo calcular una ruta.")
     return false
 end
 
--- BUCLE PRINCIPAL
-local function iniciar()
-    while true do
-        local objeto = buscarObjeto()
+local puntos = path:GetWaypoints()
 
-        if not objeto then
-            print("Todos los objetos han sido procesados.")
-            break
-        end
+for _, punto in ipairs(puntos) do
+    if humanoid.Health <= 0 then
+        return false
+    end
 
-        print("Objetivo:", objeto.Name)
+    if punto.Action == Enum.PathWaypointAction.Jump then
+        humanoid.Jump = true
+    end
 
-        if caminarHasta(objeto) then
-            print("Llegada:", objeto.Name)
-            task.wait(TIEMPO_ESPERA)
-        else
-            warn("No se pudo alcanzar:", objeto.Name)
-        end
+    humanoid:MoveTo(punto.Position)
+    local llego = humanoid.MoveToFinished:Wait()
 
-        procesados[objeto] = true
+    if not llego then
+        warn("El personaje no pudo llegar al siguiente punto.")
+        return false
     end
 end
+
+return true
+
+end
+
+local function iniciar()
+if ocupado then return end
+ocupado = true
+
+local personaje, humanoid, root = obtenerPersonaje()
+humanoid.WalkSpeed = VELOCIDAD
+
+while humanoid.Health > 0 do
+    local objeto = buscarMasCercana(root)
+
+    if not objeto then
+        task.wait(1)
+        continue
+    end
+
+    local posicion = obtenerPosicion(objeto)
+
+    if not posicion then
+        procesadas[objeto] = true
+        continue
+    end
+
+    local direccion = root.Position - posicion
+
+    if direccion.Magnitude < 0.01 then
+        direccion = Vector3.new(1, 0, 0)
+    else
+        direccion = direccion.Unit
+    end
+
+    local destino = posicion + direccion * DISTANCIA_OBJETO
+    local llego = caminarA(humanoid, root, destino)
+
+    if llego and objeto.Parent then
+        task.wait(TIEMPO_ESPERA)
+        procesadas[objeto] = true
+    else
+        task.wait(1)
+    end
+
+    if player.Character ~= personaje then
+        break
+    end
+end
+
+ocupado = false
+
+end
+
+player.CharacterAdded:Connect(function()
+task.wait(1)
+iniciar()
+end)
 
 iniciar()
