@@ -1,17 +1,20 @@
 local Players = game:GetService("Players")
 local PathfindingService = game:GetService("PathfindingService")
-local RunService = game:GetService("RunService")
 
 local player = Players.LocalPlayer
 
-local carpeta = workspace.WorkspaceCom["001_MapLights"].BlackPoles
+local carpeta =
+    workspace.WorkspaceCom["001_MapLights"].BlackPoles
 
--- Configuración del movimiento
-local DISTANCIA_LLEGADA = 5
-local DISTANCIA_DETECCION = 7
-local DISTANCIA_LATERAL = 6
-local VELOCIDAD_RECALCULO = 0.6
+-- CONFIGURACIÓN
+local RADIO_LLEGADA = 5
+local INTERVALO_RECALCULO = 1
+local TIEMPO_ATASCADO = 3
+local DISTANCIA_MINIMA = 1.5
 
+local activo = true
+
+-- Obtener la posición de una pieza o modelo
 local function obtenerPosicion(objeto)
     if objeto:IsA("BasePart") then
         return objeto.Position
@@ -22,112 +25,157 @@ local function obtenerPosicion(objeto)
     return nil
 end
 
--- Detectar obstáculos frente al personaje
-local function detectarObstaculo(character, root)
-    local parametros = RaycastParams.new()
-    parametros.FilterType = Enum.RaycastFilterType.Exclude
-    parametros.FilterDescendantsInstances = {character}
+-- Crear una ruta completa
+local function calcularRuta(origen, destino)
+    local path = PathfindingService:CreatePath({
+        AgentRadius = 2,
+        AgentHeight = 5,
+        AgentCanJump = true,
+        AgentCanClimb = true,
+        WaypointSpacing = 4
+    })
 
-    local origen = root.Position
-    local direccion = root.CFrame.LookVector * DISTANCIA_DETECCION
+    local exito = pcall(function()
+        path:ComputeAsync(origen, destino)
+    end)
 
-    return workspace:Raycast(origen, direccion, parametros)
+    if exito and path.Status == Enum.PathStatus.Success then
+        return path
+    end
+
+    return nil
 end
 
--- Comprobar si hay espacio en una dirección
-local function espacioLibre(character, root, direccion)
-    local parametros = RaycastParams.new()
-    parametros.FilterType = Enum.RaycastFilterType.Exclude
-    parametros.FilterDescendantsInstances = {character}
-
-    local origen = root.Position + Vector3.new(0, 1, 0)
-    local resultado = workspace:Raycast(
-        origen,
-        direccion.Unit * DISTANCIA_LATERAL,
-        parametros
-    )
-
-    return resultado == nil
-end
-
--- Caminar hacia un destino evitando obstáculos
+-- Caminar hacia un destino con recuperación de atascos
 local function caminarHacia(destino)
     local character = player.Character or player.CharacterAdded:Wait()
     local humanoid = character:WaitForChild("Humanoid")
     local root = character:WaitForChild("HumanoidRootPart")
 
-    humanoid.AutoRotate = true
+    local ultimaPosicion = root.Position
+    local ultimoProgreso = os.clock()
 
-    local ultimoCalculo = 0
-    local destinoTemporal = destino
-
-    while character.Parent and humanoid.Health > 0 do
+    while activo and character.Parent and humanoid.Health > 0 do
         local distancia = (root.Position - destino).Magnitude
 
-        if distancia <= DISTANCIA_LLEGADA then
+        if distancia <= RADIO_LLEGADA then
+            return true
+        end
+
+        -- Calcular una ruta completa desde la posición actual
+        local path = calcularRuta(root.Position, destino)
+
+        if path then
+            local waypoints = path:GetWaypoints()
+            local rutaBloqueada = false
+
+            local conexion = path.Blocked:Connect(function()
+                rutaBloqueada = true
+            end)
+
+            for indice, waypoint in ipairs(waypoints) do
+                if indice > 1 then
+                    if rutaBloqueada then
+                        break
+                    end
+
+                    if not character.Parent or humanoid.Health <= 0 then
+                        conexion:Disconnect()
+                        return false
+                    end
+
+                    if waypoint.Action ==
+                        Enum.PathWaypointAction.Jump then
+                        humanoid.Jump = true
+                    end
+
+                    humanoid:MoveTo(waypoint.Position)
+
+                    local inicioMovimiento = os.clock()
+
+                    repeat
+                        task.wait(0.15)
+
+                        if (root.Position - destino).Magnitude
+                            <= RADIO_LLEGADA then
+                            conexion:Disconnect()
+                            return true
+                        end
+
+                        -- Detectar si el personaje dejó de avanzar
+                        if (root.Position - ultimaPosicion).Magnitude
+                            >= DISTANCIA_MINIMA then
+                            ultimaPosicion = root.Position
+                            ultimoProgreso = os.clock()
+                        end
+
+                        if os.clock() - ultimoProgreso
+                            >= TIEMPO_ATASCADO then
+                            break
+                        end
+
+                        if os.clock() - inicioMovimiento
+                            >= INTERVALO_RECALCULO * 5 then
+                            break
+                        end
+
+                    until humanoid.Health <= 0
+                        or rutaBloqueada
+                        or (root.Position - waypoint.Position).Magnitude
+                            <= RADIO_LLEGADA
+
+                    if os.clock() - ultimoProgreso >= TIEMPO_ATASCADO
+                        or rutaBloqueada then
+                        break
+                    end
+                end
+            end
+
+            conexion:Disconnect()
+        else
+            -- Si no encuentra una ruta, salta y vuelve a intentar
+            humanoid.Jump = true
+            task.wait(INTERVALO_RECALCULO)
+        end
+
+        -- Pausa breve antes de recalcular desde la posición actual
+        task.wait(0.2)
+    end
+
+    return false
+end
+
+-- Obtener objetos que se pueden visitar
+local function obtenerObjetivos()
+    local objetivos = {}
+
+    for _, objeto in ipairs(carpeta:GetDescendants()) do
+        if objeto:IsA("BasePart") then
+            table.insert(objetivos, objeto)
+        end
+    end
+
+    return objetivos
+end
+
+-- Recorrido
+while activo do
+    local objetivos = obtenerObjetivos()
+
+    for _, objeto in ipairs(objetivos) do
+        if not activo then
             break
         end
 
-        if os.clock() - ultimoCalculo >= VELOCIDAD_RECALCULO then
-            ultimoCalculo = os.clock()
+        if objeto:IsDescendantOf(workspace) then
+            local destino = obtenerPosicion(objeto)
 
-            local obstaculo = detectarObstaculo(character, root)
-
-            if obstaculo then
-                local derecha = root.CFrame.RightVector
-                local izquierda = -derecha
-
-                local derechaLibre =
-                    espacioLibre(character, root, derecha)
-
-                local izquierdaLibre =
-                    espacioLibre(character, root, izquierda)
-
-                if derechaLibre then
-                    destinoTemporal =
-                        root.Position + derecha * DISTANCIA_LATERAL
-                elseif izquierdaLibre then
-                    destinoTemporal =
-                        root.Position + izquierda * DISTANCIA_LATERAL
-                else
-                    -- Si ambos lados están bloqueados, intenta
-                    -- calcular una ruta alrededor del obstáculo.
-                    local path = PathfindingService:CreatePath()
-
-                    local ok = pcall(function()
-                        path:ComputeAsync(root.Position, destino)
-                    end)
-
-                    if ok and path.Status == Enum.PathStatus.Success then
-                        local puntos = path:GetWaypoints()
-
-                        if #puntos > 1 then
-                            destinoTemporal = puntos[2].Position
-                        else
-                            destinoTemporal = destino
-                        end
-                    else
-                        humanoid.Jump = true
-                        destinoTemporal = destino
-                    end
-                end
-            else
-                destinoTemporal = destino
+            if destino then
+                caminarHacia(destino)
+                task.wait(0.25)
             end
-
-            humanoid:MoveTo(destinoTemporal)
         end
-
-        RunService.Heartbeat:Wait()
     end
-end
 
--- Recorrer los objetos de la carpeta
-for _, objeto in ipairs(carpeta:GetChildren()) do
-    local destino = obtenerPosicion(objeto)
-
-    if destino then
-        caminarHacia(destino)
-        task.wait(0.2)
-    end
+    break
 end
